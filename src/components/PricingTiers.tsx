@@ -1,9 +1,10 @@
 
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Check } from "lucide-react";
+import { supabase } from "@/integrations/supabase/client";
 
 interface PricingTiersProps {
   onTierSelect: (tier: string) => void;
@@ -11,55 +12,75 @@ interface PricingTiersProps {
 
 const PricingTiers = ({ onTierSelect }: PricingTiersProps) => {
   const [selectedTier, setSelectedTier] = useState('pro');
-  // Determine whether the most recent assessment was a Focus Flicker task.  This
-  // state drives which feature labels appear in the pricing cards.
-  const [isFlicker, setIsFlicker] = useState(false);
-  useEffect(() => {
-    try {
-      const saved = localStorage.getItem('assessment_data');
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        setIsFlicker(parsed.task === 'focusFlicker');
-      }
-    } catch {
-      // ignore parse errors
-    }
-  }, []);
+  const [isLoading, setIsLoading] = useState(false);
 
-  // When a pricing card is selected, persist the choice and go straight to results
- // replace your handlePlanSelection
-const handlePlanSelection = async (tier: 'starter'|'pro'|'free') => {
-  if (tier === 'free') { onTierSelect('free'); return; }
+  const handlePlanSelection = async () => {
+  if (selectedTier === "free") {
+    // Persist the free choice too
+    localStorage.setItem("selected_tier", "free");
+    onTierSelect("free");
+    return;
+  }
 
-  const assessment_id =
-    localStorage.getItem('current_assessment_id') ||
-    (window as any).current_assessment_id || 'unknown';
+  // Must have an assessment id from the finished task
+  const assessmentId = localStorage.getItem("current_assessment_id");
+  if (!assessmentId) {
+    alert("No assessment found. Please complete the assessment first.");
+    return;
+  }
 
+  // Persist the paid plan immediately so the results page can use it
+  localStorage.setItem("selected_tier", selectedTier);
+
+  // Stable token so webhooks/verification can tie back to the same browser
+  let accessToken = localStorage.getItem("results_access_token");
+  if (!accessToken) {
+    accessToken = crypto.randomUUID();
+    localStorage.setItem("results_access_token", accessToken);
+  }
+
+  setIsLoading(true);
   try {
-    const { data, error } = await supabase.functions.invoke('create-checkout-session', {
-      method: 'POST',
-      body: { plan: tier, assessment_id },
+    // 1) Preferred path: your Edge Function (lets you include allow_promotion_codes, success_url with tier, etc.)
+    const { data, error } = await supabase.functions.invoke("create-checkout-session", {
+      body: {
+        plan: selectedTier,               // 'starter' | 'pro'
+        assessment_id: assessmentId,
+        access_token: accessToken,
+      },
     });
 
     if (error) throw error;
+    if (!data?.url) throw new Error("No checkout URL returned");
 
-    const url = (data as any)?.url;       // the function MUST return { url }
-    if (!url) throw new Error('No checkout URL');
+    window.location.href = data.url; // Go to Stripe Checkout
+  } catch (err: any) {
+    console.warn("Falling back to Stripe Payment Link:", err?.message || err);
 
-    window.location.assign(url);           // leave app → Stripe Checkout
-  } catch (e:any) {
-    alert(`Checkout failed: ${e?.message || 'unknown error'}`);
+    // 2) Fallback: REAL Stripe Payment Links (configured in Dashboard)
+    //    Replace the placeholders below with your actual Payment Link URLs.
+    const PAYMENT_LINKS: Record<string, string> = {
+      starter: "https://pay.cogello.com/b/dRmeVd9QgbfK8l96gy5ZC02", // 
+      pro:     "https://pay.cogello.com/b/bJebJ16E41Fa1WL7kC5ZC03", // 
+    };
+
+    const link = PAYMENT_LINKS[selectedTier];
+    if (!link) {
+      alert("Invalid plan selected.");
+      setIsLoading(false);
+      return;
+    }
+
+    // IMPORTANT: in the Stripe Dashboard, set each Payment Link’s
+    // Success URL to:
+    //   https://flex-sort.cogello.com/?checkout=success&session_id={CHECKOUT_SESSION_ID}&tier=<starter-or-pro>
+    // That way, when Stripe redirects back, your Index/useEffect picks up ?session_id and ?tier.
+
+    window.location.href = link;
+  } finally {
+    setIsLoading(false);
   }
 };
-
-
-// add this helper near the top of the component
-const functionsUrl = (name: string) => {
-  const base = import.meta.env.VITE_SUPABASE_URL!;
-  const host = new URL(base).host.replace('.supabase.co', '.functions.supabase.co');
-  return `https://${host}/${name}`;
-};
-
 
 
   const tiers = [
@@ -68,21 +89,13 @@ const functionsUrl = (name: string) => {
       name: 'Free',
       price: '$0',
       description: 'Basic metrics from your assessment',
-      features: isFlicker
-        ? [
-            'Flicker Threshold Score',
-            'Number of Hits',
-            'Count of False Alarms',
-            'Basic performance summary',
-            'Immediate digital results'
-          ]
-        : [
-            'Cognitive Flexibility Score',
-            'Number of Shifts Achieved',
-            'Count of Perseverative Errors',
-            'Basic performance summary',
-            'Immediate digital results'
-          ]
+      features: [
+        'Cognitive Flexibility Score',
+        'Number of Shifts Achieved',
+        'Count of Perseverative Errors',
+        'Basic performance summary',
+        'Immediate digital results'
+      ]
     },
     {
       id: 'starter',
@@ -92,8 +105,8 @@ const functionsUrl = (name: string) => {
       features: [
         'All features from Free',
         'AI-generated plain-language summary',
-        isFlicker ? 'Adaptive timing insights' : 'Adaptation latency insights',
-        isFlicker ? 'Detection time breakdown' : 'Response time breakdown',
+        'Adaptation latency insights',
+        'Response time breakdown',
         'Deeper performance analysis'
       ]
     },
@@ -104,7 +117,7 @@ const functionsUrl = (name: string) => {
       description: 'Advanced analysis and export options for professional use',
       features: [
         'All features from Starter',
-        isFlicker ? 'Clinical-style interpretation of attentional metrics' : 'Clinical-style interpretation',
+        'Clinical-style interpretation',
         'Legal/educational-use summary',
         'Downloadable PDF and CSV reports',
         'Raw data access'
@@ -142,7 +155,8 @@ const functionsUrl = (name: string) => {
                   : 'border border-gray-200 hover:border-gray-300'
               }`}
               onClick={() => {
-                handlePlanSelection(tier.id);
+                setSelectedTier(tier.id);
+                localStorage.setItem("selected_tier", tier.id);
               }}
             >
               {tier.popular && (
@@ -184,13 +198,15 @@ const functionsUrl = (name: string) => {
           ))}
         </div>
 
-        {/* Single centered button below cards (optional secondary trigger) */}
+        {/* Single centered button below cards */}
         <div className="text-center mb-8">
           <Button 
-            onClick={() => handlePlanSelection(selectedTier)}
-            className="bg-[#149854] hover:bg-[#149854]/90 text-white px-12 py-4 text-lg font-medium rounded-lg shadow-lg hover:shadow-xl transition-all duration-200"
+            onClick={handlePlanSelection}
+            disabled={isLoading}
+            className="bg-[#149854] hover:bg-[#149854]/90 text-white px-12 py-4 text-lg font-medium rounded-lg shadow-lg hover:shadow-xl transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {selectedTierData?.id === 'pro' ? 'Unlock Results - $29.99' : 
+            {isLoading ? 'Processing...' : 
+             selectedTierData?.id === 'pro' ? 'Unlock Results - $29.99' : 
              selectedTierData?.id === 'starter' ? 'Unlock Results - $19.99' : 
              'Select Free Plan - $0'}
           </Button>
