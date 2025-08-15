@@ -137,10 +137,17 @@ const Index = () => {
 
   // Pricing tier selected (for Free flow) – but for paid flow we still persist tier
   const handleTierSelection = (tier: string) => {
-    setSelectedTier(tier);
-    localStorage.setItem(STORAGE_KEYS.selectedTier, tier);
+  setSelectedTier(tier);
+  localStorage.setItem(STORAGE_KEYS.selectedTier, tier);
+
+  if (tier === 'free') {
+    // Free unlocks immediately
     setCurrentPhase('results');
-  };
+  } else {
+    // Paid tiers: stay on pricing; PricingTiers will redirect to Stripe
+    setCurrentPhase('pricing');
+  }
+};
 
   // On first mount:
   // 1) If we’re returning from Stripe (?checkout=success), recover params and local state.

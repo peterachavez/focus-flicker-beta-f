@@ -27,11 +27,45 @@ const PricingTiers = ({ onTierSelect }: PricingTiersProps) => {
   }, []);
 
   // When a pricing card is selected, persist the choice and go straight to results
-  const handlePlanSelection = (tierId: string) => {
-    setSelectedTier(tierId);
-    localStorage.setItem("selected_tier", tierId);
-    onTierSelect(tierId);
-  };
+ // replace your handlePlanSelection
+const handlePlanSelection = async (tierId: string) => {
+  setSelectedTier(tierId);
+  localStorage.setItem("selected_tier", tierId);
+
+  if (tierId === 'free') {
+    // Only free goes straight to results
+    onTierSelect('free');
+    return;
+  }
+
+  // Paid tiers: start checkout via Supabase Edge Function
+  const assessmentId = localStorage.getItem('current_assessment_id') || '';
+  if (!assessmentId) {
+    alert('Missing assessment id. Please finish the assessment first.');
+    return;
+  }
+
+  try {
+    const r = await fetch(functionsUrl('create-checkout-session'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tier: tierId, assessment_id: assessmentId })
+    });
+    const { url, error } = await r.json();
+    if (error || !url) throw new Error(error || 'No checkout URL');
+    window.location.assign(url); // leave app → Stripe
+  } catch (e: any) {
+    alert(`Checkout failed: ${e.message}`);
+  }
+};
+
+// add this helper near the top of the component
+const functionsUrl = (name: string) => {
+  const base = import.meta.env.VITE_SUPABASE_URL!;
+  const host = new URL(base).host.replace('.supabase.co', '.functions.supabase.co');
+  return `https://${host}/${name}`;
+};
+
 
 
   const tiers = [
