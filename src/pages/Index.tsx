@@ -140,12 +140,14 @@ const Index = () => {
   setSelectedTier(tier);
   localStorage.setItem(STORAGE_KEYS.selectedTier, tier);
 
+  const handleTierSelection = (tier: 'free' | 'starter' | 'pro') => {
+  setSelectedTier(tier);
+  localStorage.setItem('selected_tier', tier);
+
   if (tier === 'free') {
-    // Free unlocks immediately
-    setCurrentPhase('results');
+    setCurrentPhase('results');      // free unlocks immediately
   } else {
-    // Paid tiers: stay on pricing; PricingTiers will redirect to Stripe
-    setCurrentPhase('pricing');
+    setCurrentPhase('pricing');      // stay; PricingTiers will redirect to Stripe
   }
 };
 

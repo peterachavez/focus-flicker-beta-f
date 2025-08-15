@@ -210,7 +210,7 @@ const flickerErrorControl =
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = 'flex-sort-raw-data.csv';
+      a.download = 'focus-loop-raw-data.csv';
       a.click();
     }
   };

@@ -4,6 +4,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Check } from "lucide-react";
+import { supabase } from '@/integrations/supabase/client';
+
 
 interface PricingTiersProps {
   onTierSelect: (tier: string) => void;
@@ -28,34 +30,40 @@ const PricingTiers = ({ onTierSelect }: PricingTiersProps) => {
 
   // When a pricing card is selected, persist the choice and go straight to results
  // replace your handlePlanSelection
-const handlePlanSelection = async (tierId: string) => {
+const handlePlanSelection = async (tierId: 'free' | 'starter' | 'pro') => {
   setSelectedTier(tierId);
-  localStorage.setItem("selected_tier", tierId);
+  localStorage.setItem('selected_tier', tierId);
+
+  // The assessment id that gates access; make sure you store this earlier in the flow.
+  const assessmentId =
+    localStorage.getItem('current_assessment_id') ||
+    (window as any).current_assessment_id ||
+    '';
 
   if (tierId === 'free') {
-    // Only free goes straight to results
+    // Free goes straight to results (same as Flex Sort)
     onTierSelect('free');
     return;
   }
 
-  // Paid tiers: start checkout via Supabase Edge Function
-  const assessmentId = localStorage.getItem('current_assessment_id') || '';
-  if (!assessmentId) {
-    alert('Missing assessment id. Please finish the assessment first.');
-    return;
-  }
-
+  // Paid tiers MUST NOT advance the app — start Stripe Checkout instead.
   try {
-    const r = await fetch(functionsUrl('create-checkout-session'), {
+    const { data, error } = await supabase.functions.invoke('create-checkout-session', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tier: tierId, assessment_id: assessmentId })
+      body: {
+        // Name it "plan" to match most function templates; if your function expects "tier", it’s okay:
+        plan: tierId,
+        tier: tierId,
+        assessment_id: assessmentId,
+      },
     });
-    const { url, error } = await r.json();
-    if (error || !url) throw new Error(error || 'No checkout URL');
-    window.location.assign(url); // leave app → Stripe
+
+    if (error) throw error;
+    if (!data?.url) throw new Error('No checkout URL returned from server');
+    window.location.assign(data.url); // leave app → Stripe
   } catch (e: any) {
-    alert(`Checkout failed: ${e.message}`);
+    console.error(e);
+    alert(e?.message || 'Checkout failed');
   }
 };
 
