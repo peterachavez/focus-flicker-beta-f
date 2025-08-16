@@ -125,40 +125,35 @@ export default function PaymentVerificationWrapper({
       setIsBusy(true);
 
       // 1) FREE never needs verification
-      if (tier === "free") {
-        if (!cancelled) {
-          setGrantedTier("free");
-          setVerification({ verified: true });
-          setIsBusy(false);
-        }
-        return;
-      }
+      if (tier === "free") { ... return; }
 
-      // 2) Try DB first (covers reloads / missing session_id)
-      const dbPlan = await fetchGrantedFromDB();
-      if (!cancelled && dbPlan && dbPlan !== "free") {
-        setGrantedTier(dbPlan);
-        setVerification({ verified: true, plan_tier: dbPlan as Exclude<Tier, "free"> });
-        setIsBusy(false);
-        return;
-      }
-
-      // 3) If we have a session_id, verify with Stripe via Edge Function
+      // 2) If we have a session_id, verify FIRST (authoritative for this purchase)
       if (session) {
         const v = await callVerify(session);
         if (!cancelled) {
           setVerification(v);
           if (v.verified && v.plan_tier) {
-            setGrantedTier(v.plan_tier);
-          } else {
-            // Fallback to requested tier only for display, but mark as not verified
-            setGrantedTier("free");
+            setGrantedTier(v.plan_tier);                   // 'pro' / 'starter' from Stripe
+            // optional hygiene:
+            localStorage.setItem('access_plan', v.plan_tier);
+            localStorage.removeItem('selected_tier');
+            setIsBusy(false);
+            return;
           }
-          setIsBusy(false);
+          // fall through to DB if verification didn't succeed
         }
+      }
+
+      // 3) No (or failed) verification → check DB for prior grants
+      const dbPlan = await fetchGrantedFromDB();
+      if (!cancelled && dbPlan && dbPlan !== "free") {
+        setGrantedTier(dbPlan as "starter" | "pro");
+        setVerification({ verified: true, plan_tier: dbPlan as "starter" | "pro" });
+        setIsBusy(false);
         return;
       }
 
+      // 4) Nothing verified → free with message
       // 4) No session, nothing in DB → show free while telling user we couldn’t verify
       if (!cancelled) {
         setGrantedTier("free");

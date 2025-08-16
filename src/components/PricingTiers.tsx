@@ -5,6 +5,15 @@ import { Badge } from "@/components/ui/badge";
 import { Check } from "lucide-react";
 import { supabase } from '@/integrations/supabase/client';
 
+function ensureAssessmentId() {
+  let id = localStorage.getItem('current_assessment_id');
+  if (!id || !id.startsWith('ff_')) {
+    id = `ff_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
+    localStorage.setItem('current_assessment_id', id);
+  }
+  return id;
+}
+
 interface PricingTiersProps {
   onTierSelect: (tier: string) => void;
 }
@@ -52,7 +61,7 @@ const PricingTiers = ({ onTierSelect }: PricingTiersProps) => {
   const handleProceed = async () => {
     const tierId = selectedTier;
     // gate id you saved earlier in your flow
-    const assessmentId =
+    const assessmentId = ensureAssessmentId();
       localStorage.getItem('current_assessment_id') ||
       (window as any).current_assessment_id ||
       '';
