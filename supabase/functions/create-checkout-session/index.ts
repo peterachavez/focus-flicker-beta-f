@@ -10,7 +10,7 @@ const corsHeaders = {
 
 // --- Env ---
 const STRIPE_SECRET_KEY = Deno.env.get("STRIPE_SECRET_KEY");
-const FRONTEND_DOMAIN = Deno.env.get("FRONTEND_DOMAIN");
+const FRONTEND_DOMAIN = Deno.env.get("FRONTEND_DOMAIN"); // e.g. https://flex-sort.cogello.com
 const STARTER_PRICE_ID = Deno.env.get("STARTER_PRICE_ID");
 const PRO_PRICE_ID = Deno.env.get("PRO_PRICE_ID");
 
@@ -84,4 +84,3 @@ serve(async (req) => {
     });
   }
 });
-
