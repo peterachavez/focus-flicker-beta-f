@@ -62,9 +62,6 @@ const PricingTiers = ({ onTierSelect }: PricingTiersProps) => {
     const tierId = selectedTier;
     // gate id you saved earlier in your flow
     const assessmentId = ensureAssessmentId();
-      localStorage.getItem('current_assessment_id') ||
-      (window as any).current_assessment_id ||
-      '';
 
     if (!assessmentId && tierId !== 'free') {
       alert('Missing assessment ID. Please restart the assessment.');

@@ -124,36 +124,41 @@ export default function PaymentVerificationWrapper({
     const run = async () => {
       setIsBusy(true);
 
-      // 1) FREE never needs verification
-      if (tier === "free") { ... return; }
-
-      // 2) If we have a session_id, verify FIRST (authoritative for this purchase)
-      if (session) {
-        const v = await callVerify(session);
-        if (!cancelled) {
-          setVerification(v);
-          if (v.verified && v.plan_tier) {
-            setGrantedTier(v.plan_tier);                   // 'pro' / 'starter' from Stripe
-            // optional hygiene:
-            localStorage.setItem('access_plan', v.plan_tier);
-            localStorage.removeItem('selected_tier');
-            setIsBusy(false);
-            return;
-          }
-          // fall through to DB if verification didn't succeed
-        }
-      }
-
-      // 3) No (or failed) verification → check DB for prior grants
-      const dbPlan = await fetchGrantedFromDB();
-      if (!cancelled && dbPlan && dbPlan !== "free") {
-        setGrantedTier(dbPlan as "starter" | "pro");
-        setVerification({ verified: true, plan_tier: dbPlan as "starter" | "pro" });
+    // 1) FREE never needs verification
+      if (tier === "free") {
+        setGrantedTier("free");
+        setVerification({ verified: true }); // mark as "handled" so no error banner shows
         setIsBusy(false);
         return;
       }
 
-      // 4) Nothing verified → free with message
+    // 2) If we have a session_id, verify FIRST (authoritative for this purchase)
+    if (session) {
+      const v = await callVerify(session);
+      if (!cancelled) {
+        setVerification(v);
+        if (v.verified && v.plan_tier) {
+          setGrantedTier(v.plan_tier);                   // 'pro' / 'starter' from Stripe
+          // optional hygiene:
+          localStorage.setItem('access_plan', v.plan_tier);
+          localStorage.removeItem('selected_tier');
+          setIsBusy(false);
+          return;
+        }
+        // fall through to DB if verification didn't succeed
+      }
+    }
+
+    // 3) No (or failed) verification → check DB for prior grants
+    const dbPlan = await fetchGrantedFromDB();
+    if (!cancelled && dbPlan && dbPlan !== "free") {
+      setGrantedTier(dbPlan as "starter" | "pro");
+      setVerification({ verified: true, plan_tier: dbPlan as "starter" | "pro" });
+      setIsBusy(false);
+      return;
+    }
+
+    // 4) Nothing verified → free with message
       // 4) No session, nothing in DB → show free while telling user we couldn’t verify
       if (!cancelled) {
         setGrantedTier("free");
