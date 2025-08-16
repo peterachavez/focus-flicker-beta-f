@@ -1,113 +1,205 @@
-import React, { useState, useEffect } from 'react';
-import { supabase } from '@/integrations/supabase/client';
+import React, { useEffect, useMemo, useState } from "react";
+import { supabase } from "@/integrations/supabase/client";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Loader2, CheckCircle, XCircle } from 'lucide-react';
-import ResultsDashboard from './ResultsDashboard';
-import { AssessmentData } from '../pages/Index';
+import { Loader2, CheckCircle, XCircle } from "lucide-react";
+import ResultsDashboard from "./ResultsDashboard";
+import { AssessmentData } from "../pages/Index";
+
+type Tier = "free" | "starter" | "pro";
 
 interface PaymentVerificationWrapperProps {
   data: AssessmentData;
-  tier: string;            // 'free' | 'starter' | 'pro'
-  sessionId?: string;      // optional, from ?session_id=...
+  tier: Tier;             // user’s requested tier (from pricing)
+  sessionId?: string;     // optional ?session_id=...
 }
 
 interface VerificationResult {
   verified: boolean;
-  plan_tier?: 'starter' | 'pro';
+  plan_tier?: Exclude<Tier, "free">;
   error?: string;
   details?: string;
 }
 
-const PaymentVerificationWrapper = ({ data, tier, sessionId }: PaymentVerificationWrapperProps) => {
-  const [isVerifying, setIsVerifying] = useState(false);
-  const [verificationResult, setVerificationResult] = useState<VerificationResult | null>(null);
-  const [verifiedTier, setVerifiedTier] = useState<string>(tier);
+function parseSessionId(): string | undefined {
+  try {
+    const u = new URL(window.location.href);
+    const raw = u.searchParams.get("session_id") || undefined;
+    // Just in case Stripe adds a fragment, strip it.
+    return raw?.split("#")[0];
+  } catch {
+    return undefined;
+  }
+}
 
-  useEffect(() => {
-    // prefer prop, fallback to URL param
-    const idFromUrl = (() => {
-      try {
-        const u = new URL(window.location.href);
-        return u.searchParams.get('session_id') || undefined;
-      } catch {
-        return undefined;
-      }
-    })();
+function getAssessmentId(): string | undefined {
+  try {
+    return (
+      localStorage.getItem("current_assessment_id") ||
+      (window as any).current_assessment_id ||
+      undefined
+    );
+  } catch {
+    return undefined;
+  }
+}
 
-    const id = sessionId || idFromUrl;
+export default function PaymentVerificationWrapper({
+  data,
+  tier,
+  sessionId,
+}: PaymentVerificationWrapperProps) {
+  const [isBusy, setIsBusy] = useState(true);
+  const [verification, setVerification] = useState<VerificationResult | null>(null);
+  const [grantedTier, setGrantedTier] = useState<Tier>("free");
 
-    // Free -> nothing to verify
-    if (tier === 'free') {
-      setVerificationResult({ verified: true });
-      return;
+  const session = useMemo(() => sessionId || parseSessionId(), [sessionId]);
+  const assessmentId = useMemo(() => getAssessmentId(), []);
+
+  // Query the DB to see if this assessment already has access
+  const fetchGrantedFromDB = async (): Promise<Tier | undefined> => {
+    if (!assessmentId) return undefined;
+
+    // RLS is disabled on results_access in your project, so anon read is fine.
+    const { data: rows, error } = await supabase
+      .from("results_access")
+      .select("plan")
+      .eq("assessment_id", assessmentId)
+      .order("created_at", { ascending: false })
+      .limit(1);
+
+    if (error) {
+      console.warn("[results_access lookup] error:", error.message);
+      return undefined;
     }
+    const plan = rows?.[0]?.plan as Tier | undefined;
+    return plan;
+  };
 
-    // Starter/Pro must verify if we have a session_id
-    if ((tier === 'starter' || tier === 'pro') && id) {
-      verifyPayment(id);
-    }
-  }, [sessionId, tier]);
-
-  const verifyPayment = async (id: string) => {
-    setIsVerifying(true);
+  const callVerify = async (sid: string): Promise<VerificationResult> => {
     try {
-      const { data: verifyData, error } = await supabase.functions.invoke('verify-payment', {
-        method: 'POST',
-        body: { session_id: id }, // no Authorization header – function is deployed with --no-verify-jwt
-      });
+      const { data: verifyData, error } = await supabase.functions.invoke(
+        "verify-payment",
+        {
+          method: "POST",
+          body: {
+            session_id: sid,
+            assessment_id: assessmentId, // let the function upsert with the right id
+          },
+        }
+      );
 
       if (error) {
-        setVerificationResult({
+        return {
           verified: false,
-          error: 'Payment verification failed.',
-          details: error.message
-        });
-        return;
+          error: "Payment verification failed.",
+          details: error.message,
+        };
       }
 
       if (verifyData?.verified) {
-        const plan = verifyData.plan_tier as 'starter' | 'pro';
-        setVerificationResult({ verified: true, plan_tier: plan });
-        setVerifiedTier(plan);
-      } else {
-        setVerificationResult({
-          verified: false,
-          error: verifyData?.error || 'Payment could not be verified',
-          details: verifyData?.details
-        });
+        return {
+          verified: true,
+          plan_tier: verifyData.plan_tier as "starter" | "pro",
+        };
       }
-    } catch (err: any) {
-      setVerificationResult({
+
+      return {
         verified: false,
-        error: 'Unexpected error verifying payment.',
-        details: err?.message || String(err)
-      });
-    } finally {
-      setIsVerifying(false);
+        error: verifyData?.error || "Payment could not be verified.",
+        details: verifyData?.details,
+      };
+    } catch (e: any) {
+      return {
+        verified: false,
+        error: "Unexpected error verifying payment.",
+        details: e?.message || String(e),
+      };
     }
   };
 
-  if (isVerifying) {
+  useEffect(() => {
+    let cancelled = false;
+
+    const run = async () => {
+      setIsBusy(true);
+
+      // 1) FREE never needs verification
+      if (tier === "free") {
+        if (!cancelled) {
+          setGrantedTier("free");
+          setVerification({ verified: true });
+          setIsBusy(false);
+        }
+        return;
+      }
+
+      // 2) Try DB first (covers reloads / missing session_id)
+      const dbPlan = await fetchGrantedFromDB();
+      if (!cancelled && dbPlan && dbPlan !== "free") {
+        setGrantedTier(dbPlan);
+        setVerification({ verified: true, plan_tier: dbPlan as Exclude<Tier, "free"> });
+        setIsBusy(false);
+        return;
+      }
+
+      // 3) If we have a session_id, verify with Stripe via Edge Function
+      if (session) {
+        const v = await callVerify(session);
+        if (!cancelled) {
+          setVerification(v);
+          if (v.verified && v.plan_tier) {
+            setGrantedTier(v.plan_tier);
+          } else {
+            // Fallback to requested tier only for display, but mark as not verified
+            setGrantedTier("free");
+          }
+          setIsBusy(false);
+        }
+        return;
+      }
+
+      // 4) No session, nothing in DB → show free while telling user we couldn’t verify
+      if (!cancelled) {
+        setGrantedTier("free");
+        setVerification({
+          verified: false,
+          error: "Missing checkout session.",
+          details:
+            "We couldn’t find a Stripe session or prior access record for this assessment.",
+        });
+        setIsBusy(false);
+      }
+    };
+
+    run();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tier, session]);
+
+  // ----- UI states -----
+  if (isBusy) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center px-6">
         <Card className="max-w-md mx-auto text-center">
           <CardHeader>
             <CardTitle className="flex items-center justify-center gap-2">
               <Loader2 className="h-6 w-6 animate-spin text-blue-600" />
-              Verifying Payment
+              Verifying payment…
             </CardTitle>
           </CardHeader>
           <CardContent>
-            <p className="text-gray-600">Checking with Stripe…</p>
+            <p className="text-gray-600">Checking your access now.</p>
           </CardContent>
         </Card>
       </div>
     );
   }
 
-  if (verificationResult && !verificationResult.verified && (tier === 'starter' || tier === 'pro')) {
-    const fallbackId = sessionId || new URL(window.location.href).searchParams.get('session_id') || '';
+  if (verification && !verification.verified && (tier === "starter" || tier === "pro")) {
+    const fallbackId = session || "";
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center px-6">
         <Card className="max-w-md mx-auto text-center">
@@ -119,42 +211,43 @@ const PaymentVerificationWrapper = ({ data, tier, sessionId }: PaymentVerificati
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="bg-red-50 border border-red-200 rounded-lg p-4 text-left">
-              <p className="text-red-800 font-medium mb-1">{verificationResult.error}</p>
-              {verificationResult.details && (
-                <p className="text-red-700 text-sm">Details: {verificationResult.details}</p>
+              <p className="text-red-800 font-medium mb-1">{verification.error}</p>
+              {verification.details && (
+                <p className="text-red-700 text-sm">Details: {verification.details}</p>
               )}
             </div>
-            <Button onClick={() => verifyPayment(fallbackId)} disabled={!fallbackId}>
-              Retry Verification
+            <Button onClick={() => { window.location.reload(); }} variant="default">
+              Retry
             </Button>
-            <div className="text-xs text-gray-500 mt-2">Session ID: {fallbackId || 'none'}</div>
+            {fallbackId && (
+              <div className="text-xs text-gray-500 mt-2">Session ID: {fallbackId}</div>
+            )}
           </CardContent>
         </Card>
       </div>
     );
   }
 
-  if (verificationResult?.verified && (verifiedTier === 'starter' || verifiedTier === 'pro')) {
-    return (
-      <div className="min-h-screen bg-gray-50">
+  // Success banner when we’ve actually verified (DB or function)
+  const showSuccess =
+    verification?.verified && (grantedTier === "starter" || grantedTier === "pro");
+
+  return (
+    <div className="min-h-screen bg-gray-50">
+      {showSuccess && (
         <div className="bg-green-50 border-b border-green-200 px-6 py-4">
           <div className="max-w-6xl mx-auto flex items-center gap-3">
             <CheckCircle className="h-5 w-5 text-green-600" />
             <div>
               <p className="text-green-800 font-medium">Payment verified!</p>
               <p className="text-green-700 text-sm">
-                Your {verifiedTier === 'pro' ? 'Pro' : 'Starter'} results are unlocked.
+                Your {grantedTier === "pro" ? "Pro" : "Starter"} results are unlocked.
               </p>
             </div>
           </div>
         </div>
-        <ResultsDashboard data={data} tier={verifiedTier} />
-      </div>
-    );
-  }
-
-  // Default
-  return <ResultsDashboard data={data} tier={verifiedTier} />;
-};
-
-export default PaymentVerificationWrapper;
+      )}
+      <ResultsDashboard data={data} tier={grantedTier} />
+    </div>
+  );
+}

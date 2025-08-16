@@ -98,13 +98,13 @@ Deno.serve(async (req) => {
     // Pull identifiers from metadata first (recommended)
     let assessment_id =
       (session.metadata?.assessment_id as string | undefined)?.trim() ?? "";
-    let plan_tier =
-      ((session.metadata?.plan_tier ||
+    let plan =
+      ((session.metadata?.plan ||
         session.metadata?.tier ||
         session.metadata?.plan) as string | undefined)?.trim() ?? "";
 
     // Fallback: infer plan from the first line item price if missing
-    if (!plan_tier) {
+    if (!plan) {
       // line_items might already be expanded via expand above, but not guaranteed
       let priceId: string | undefined;
 
@@ -116,7 +116,7 @@ Deno.serve(async (req) => {
         priceId = items.data[0]?.price?.id;
       }
 
-      plan_tier = mapPriceToTier(priceId);
+      plan = mapPriceToTier(priceId);
     }
 
     // If still missing assessment_id, attempt to parse from success_url query (optional)
@@ -135,8 +135,8 @@ Deno.serve(async (req) => {
     if (!assessment_id) {
       return json({ verified: false, error: "missing_assessment_id" }, 400);
     }
-    if (!plan_tier || (plan_tier !== "starter" && plan_tier !== "pro")) {
-      return json({ verified: false, error: "invalid_or_missing_plan_tier" }, 400);
+    if (!plan || (plan !== "starter" && plan !== "pro")) {
+      return json({ verified: false, error: "invalid_or_missing_plan" }, 400);
     }
 
     // UPSERT into public.results_access
@@ -144,7 +144,7 @@ Deno.serve(async (req) => {
     const { error: upsertErr } = await supabase
       .from("results_access")
       .upsert(
-        { assessment_id, plan: plan_tier, session_id },
+        { assessment_id, plan: plan, session_id },
         { onConflict: "assessment_id", ignoreDuplicates: false }
       );
 
@@ -157,7 +157,7 @@ Deno.serve(async (req) => {
     return json({
       verified: true,
       assessment_id,
-      plan_tier,
+      plan,
       session_id,
     });
   } catch (err) {

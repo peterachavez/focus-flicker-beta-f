@@ -119,7 +119,7 @@ Deno.serve(async (req) => {
           .upsert(
             {
               assessment_id,
-              plan_tier: plan,
+              plan: plan,
               session_id: session.id,
             },
             { onConflict: "assessment_id" }
