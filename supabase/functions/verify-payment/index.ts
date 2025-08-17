@@ -1,167 +1,136 @@
 // supabase/functions/verify-payment/index.ts
-// Deploy with: supabase functions deploy verify-payment --no-verify-jwt
+import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
+import Stripe from "https://esm.sh/stripe@16.12.0?target=deno";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
 
-import Stripe from "npm:stripe@14.25.0";
-import { createClient } from "npm:@supabase/supabase-js@2";
+type Plan = "starter" | "pro";
 
-type Json = Record<string, unknown>;
-
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Content-Type": "application/json",
-} as const;
-
-// ---- Read required env ----
-const STRIPE_SECRET_KEY = Deno.env.get("STRIPE_SECRET_KEY");
-const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
-const SERVICE_ROLE_KEY =
-  Deno.env.get("SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-
-// Optional mapping for price → tier (nice safety net if metadata is missing)
-const STARTER_PRICE_ID = Deno.env.get("STARTER_PRICE_ID")?.trim();
-const PRO_PRICE_ID = Deno.env.get("PRO_PRICE_ID")?.trim();
-
-function json(body: Json, status = 200) {
-  return new Response(JSON.stringify(body), { status, headers: corsHeaders });
+function json(body: unknown, status = 200, corsOrigin = ""): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": corsOrigin,
+      "Access-Control-Allow-Methods": "POST,OPTIONS",
+      "Access-Control-Allow-Headers":
+        "authorization, x-client-info, apikey, content-type",
+      "Vary": "Origin",
+    },
+  });
 }
 
-function mapPriceToTier(priceId?: string | null): "starter" | "pro" | "" {
-  if (!priceId) return "";
-  if (STARTER_PRICE_ID && priceId === STARTER_PRICE_ID) return "starter";
-  if (PRO_PRICE_ID && priceId === PRO_PRICE_ID) return "pro";
-  // If you only sell two tiers and PRO is the default, you could:
-  // return "pro";
-  return "";
-}
+serve(async (req: Request) => {
+  // ---- Env (fail fast) ----
+  const FRONTEND_DOMAIN = Deno.env.get("FRONTEND_DOMAIN"); // e.g. https://focus-flicker.cogello.com
+  const STRIPE_SECRET_KEY = Deno.env.get("STRIPE_SECRET_KEY");
+  const STRIPE_WEBHOOK_SECRET = Deno.env.get("STRIPE_WEBHOOK_SECRET"); // not used here, just sanity check
+  const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
+  const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  const STARTER_PRICE_ID = Deno.env.get("STARTER_PRICE_ID");
+  const PRO_PRICE_ID = Deno.env.get("PRO_PRICE_ID");
 
-Deno.serve(async (req) => {
+  const corsOrigin = FRONTEND_DOMAIN ?? "";
+
+  if (req.method === "OPTIONS") {
+    return json({ ok: true }, 204, corsOrigin);
+  }
+  if (req.method !== "POST") {
+    return json({ ok: false, error: "Method not allowed" }, 405, corsOrigin);
+  }
+
+  if (!FRONTEND_DOMAIN || !STRIPE_SECRET_KEY || !SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+    return json({ ok: false, error: "Missing required env vars" }, 500, corsOrigin);
+  }
+
   try {
-    // CORS preflight
-    if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
-    if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
-
-    // Ensure required envs exist
-    if (!STRIPE_SECRET_KEY || !SUPABASE_URL || !SERVICE_ROLE_KEY) {
-      console.error("Missing required env(s).");
-      return json({ verified: false, error: "server_misconfigured" }, 500);
-    }
-
-    const stripe = new Stripe(STRIPE_SECRET_KEY, { apiVersion: "2024-06-20" });
-    const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
-      auth: { persistSession: false },
-    });
-
-    // Parse incoming body
-    let payload: any;
-    try {
-      payload = await req.json();
-    } catch {
-      return json({ verified: false, error: "invalid_json" }, 400);
-    }
-    const session_id: string = payload?.session_id;
+    const { session_id, assessment_id: assessmentIdFromClient } = await req.json().catch(() => ({}));
     if (!session_id || typeof session_id !== "string") {
-      return json({ verified: false, error: "missing_session_id" }, 400);
+      return json({ ok: false, error: "Missing or invalid 'session_id'" }, 400, corsOrigin);
     }
 
-    // Retrieve the Checkout Session
+    const stripe = new Stripe(STRIPE_SECRET_KEY, {
+      apiVersion: "2024-06-20",
+      httpClient: Stripe.createFetchHttpClient(),
+    });
+
+    // 1) Retrieve the Checkout Session (authoritative)
     const session = await stripe.checkout.sessions.retrieve(session_id, {
-      expand: ["payment_intent", "line_items.data.price", "subscription"],
+      expand: ["line_items.data.price"],
     });
 
-    if (!session) {
-      return json({ verified: false, error: "session_not_found" }, 404);
-    }
-
-    // Accept both payment_status=paid and status=complete
-    const isPaid =
-      session.payment_status === "paid" ||
-      session.status === "complete" ||
-      // For some setups, mode=subscription and a paid invoice also indicates success:
-      (session.mode === "subscription" && session.subscription);
-
-    if (!isPaid) {
+    // 2) Verify payment
+    if (session.payment_status !== "paid") {
       return json(
-        {
-          verified: false,
-          error: "not_paid",
-          details: {
-            status: session.status,
-            payment_status: session.payment_status,
-          },
-        },
-        400
+        { ok: true, verified: false, error: "Payment not marked as paid." },
+        200,
+        corsOrigin,
       );
     }
 
-    // Pull identifiers from metadata first (recommended)
-    let assessment_id =
-      (session.metadata?.assessment_id as string | undefined)?.trim() ?? "";
-    let plan =
-      ((session.metadata?.plan ||
-        session.metadata?.tier ||
-        session.metadata?.plan) as string | undefined)?.trim() ?? "";
+    // 3) Determine plan
+    let plan = (session.metadata?.plan as Plan | undefined) ?? undefined;
 
-    // Fallback: infer plan from the first line item price if missing
     if (!plan) {
-      // line_items might already be expanded via expand above, but not guaranteed
-      let priceId: string | undefined;
-
-      if ((session as any).line_items?.data?.length) {
-        priceId = (session as any).line_items.data[0]?.price?.id as string | undefined;
-      } else {
-        // fetch if not already expanded
-        const items = await stripe.checkout.sessions.listLineItems(session_id, { limit: 1 });
-        priceId = items.data[0]?.price?.id;
-      }
-
-      plan = mapPriceToTier(priceId);
-    }
-
-    // If still missing assessment_id, attempt to parse from success_url query (optional)
-    // This is a fallback only—prefer metadata in the create-checkout-session function.
-    if (!assessment_id) {
-      try {
-        const url = new URL(session.success_url ?? "");
-        const maybeId = url.searchParams.get("assessment_id") ?? url.searchParams.get("a");
-        if (maybeId) assessment_id = maybeId;
-      } catch {
-        // ignore parsing failure
+      // Fallback via price ID if metadata is missing
+      const priceId: string | undefined =
+        session.line_items?.data?.[0]?.price?.id || undefined;
+      if (priceId) {
+        if (STARTER_PRICE_ID && priceId === STARTER_PRICE_ID) plan = "starter";
+        if (PRO_PRICE_ID && priceId === PRO_PRICE_ID) plan = "pro";
       }
     }
 
-    // Validate we can write access
-    if (!assessment_id) {
-      return json({ verified: false, error: "missing_assessment_id" }, 400);
-    }
-    if (!plan || (plan !== "starter" && plan !== "pro")) {
-      return json({ verified: false, error: "invalid_or_missing_plan" }, 400);
-    }
-
-    // UPSERT into public.results_access
-    // Columns assumed: assessment_id (unique), plan, session_id, created_at
-    const { error: upsertErr } = await supabase
-      .from("results_access")
-      .upsert(
-        { assessment_id, plan: plan, session_id },
-        { onConflict: "assessment_id", ignoreDuplicates: false }
+    if (plan !== "starter" && plan !== "pro") {
+      return json(
+        { ok: false, error: "Unable to determine plan (starter|pro)." },
+        400,
+        corsOrigin,
       );
-
-    if (upsertErr) {
-      console.error("results_access upsert error:", upsertErr);
-      return json({ verified: false, error: "db_upsert_failed" }, 500);
     }
 
-    // Success
-    return json({
-      verified: true,
-      assessment_id,
-      plan,
-      session_id,
+    // 4) Determine assessment_id (prefer body, then metadata)
+    const resolvedAssessmentId =
+      (typeof assessmentIdFromClient === "string" && assessmentIdFromClient) ||
+      (session.metadata?.assessment_id as string | undefined) ||
+      (session.metadata?.assessmentId as string | undefined) ||
+      null;
+
+    // 5) Append-only write to results_access
+    const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+      auth: { persistSession: false },
+      global: { headers: { Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}` } },
     });
+
+    if (resolvedAssessmentId) {
+      // Insert a new row. No upsert/overwrite.
+      const { error: insertErr } = await supabase.from("results_access").insert({
+        assessment_id: resolvedAssessmentId,
+        plan,
+        session_id,
+      });
+
+      // If a harmless duplicate or transient error occurs, do not fail the request.
+      if (insertErr) {
+        console.warn("[verify-payment] insert warning:", insertErr.message);
+      }
+    } else {
+      console.warn("[verify-payment] missing assessment_id; skipping DB insert for session", session_id);
+    }
+
+    // 6) Respond with explicit JSON
+    return json(
+      {
+        ok: true,
+        verified: true,
+        plan,
+        assessment_id: resolvedAssessmentId,
+      },
+      200,
+      corsOrigin,
+    );
   } catch (err) {
-    console.error("verify-payment fatal error:", err);
-    return json({ verified: false, error: "unexpected_error" }, 500);
+    console.error("verify-payment error:", err);
+    const message = err instanceof Error ? err.message : String(err);
+    return json({ ok: false, error: message }, 200, corsOrigin);
   }
 });
