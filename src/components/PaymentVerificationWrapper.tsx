@@ -153,16 +153,19 @@ export default function PaymentVerificationWrapper({
       }
 
       // FINAL: nothing verified -> free with explicit message
-      if (!cancelled) {
-        setGrantedTier("free");
-        setVerification({
-          ok: false,
-          verified: false,
-          error: session
-            ? "Payment could not be verified."
-            : "Missing checkout session.",
-        });
-        setIsBusy(false);
+      setGrantedTier("free");
+      setVerification(
+        tier === "free" && !session
+          ? { ok: true, verified: true } // Free flow: no error, no red card
+          : {
+              ok: false,
+              verified: false,
+              error: session
+                ? "Payment could not be verified."
+                : "Missing checkout session.",
+            }
+      );
+      setIsBusy(false);
       }
     };
 
@@ -191,7 +194,9 @@ export default function PaymentVerificationWrapper({
     );
   }
 
-  if (verification && !verification.verified) {
+    // Only show the failure card if this was a paid flow (starter/pro) or there *is* a session
+    // Free (no session) should *not* show an error card
+    if (verification && !verification.verified && (tier === "starter" || tier === "pro" || !!session)) {
     const fallbackId = session || "";
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center px-6">
