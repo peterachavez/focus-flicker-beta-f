@@ -33,7 +33,7 @@ const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onStartFocusFlicker }) =>
           <h2 className="text-lg font-semibold text-gray-800 mb-3">Focus Flicker</h2>
           <p className="text-gray-600 text-sm leading-relaxed">
             A research-grade sustained attention task that adapts to your performance.
-            Takes approximately 5 minutes to complete.
+            Takes approximately 6 minutes to complete.
           </p>
         </div>
 
