@@ -10,8 +10,8 @@ type Tier = "free" | "starter" | "pro";
 
 interface PaymentVerificationWrapperProps {
   data: AssessmentData;
-  tier: Tier;             // user’s requested tier (from pricing)
-  sessionId?: string;     // optional ?session_id=...
+  tier: Tier;             // incoming hint (ignored for verification)
+  sessionId?: string;     // ?session_id=...
 }
 
 interface VerificationResult {
@@ -59,14 +59,12 @@ export default function PaymentVerificationWrapper({
 
   const hasLocalResults = useMemo(() => {
     try {
-      // minimal, defensive check; adapt to your real shape if needed
       return !!data && Object.keys(data || {}).length > 0;
     } catch {
       return false;
     }
   }, [data]);
 
-  // Query the DB to see if this assessment already has access
   const fetchGrantedFromDB = async (): Promise<Tier | undefined> => {
     if (!assessmentId) return undefined;
     const { data: rows, error } = await supabase
@@ -105,7 +103,6 @@ export default function PaymentVerificationWrapper({
         };
       }
 
-      // Expected shape: { ok, verified, plan, assessment_id } or { ok:false, error }
       return {
         ok: !!verifyData?.ok,
         verified: !!verifyData?.verified,
@@ -128,32 +125,24 @@ export default function PaymentVerificationWrapper({
     const run = async () => {
       setIsBusy(true);
 
-      // 1) FREE never needs verification
-      if (tier === "free") {
-        setGrantedTier("free");
-        setVerification({ ok: true, verified: true });
-        setIsBusy(false);
-        return;
-      }
-
-      // 2) If we have a session_id, verify FIRST (authoritative for this purchase)
+      // PRIMARY: if we have a session_id from Stripe, ALWAYS verify (ignore 'tier' hint)
       if (session) {
         const v = await callVerify(session);
         if (!cancelled) {
           setVerification(v);
           if (v.ok && v.verified && v.plan) {
-            setGrantedTier(v.plan); // 'pro' | 'starter' from Stripe
+            setGrantedTier(v.plan); // 'pro' | 'starter'
             localStorage.setItem("access_plan", v.plan);
             localStorage.removeItem("selected_tier");
-            setShowNoLocalResults(!hasLocalResults); // verified but no local data on this device
+            setShowNoLocalResults(!hasLocalResults);
             setIsBusy(false);
             return;
           }
-          // fall through to DB if verification didn't succeed
+          // fall through if verification didn't succeed
         }
       }
 
-      // 3) No (or failed) verification → check DB for prior grants
+      // SECONDARY: no session_id or verification failed -> check DB for prior grants
       const dbPlan = await fetchGrantedFromDB();
       if (!cancelled && dbPlan && dbPlan !== "free") {
         setGrantedTier(dbPlan as "starter" | "pro");
@@ -163,16 +152,15 @@ export default function PaymentVerificationWrapper({
         return;
       }
 
-      // 4) Nothing verified → free with message
+      // FINAL: nothing verified -> free with explicit message
       if (!cancelled) {
         setGrantedTier("free");
         setVerification({
           ok: false,
           verified: false,
-          error:
-            session
-              ? "Payment could not be verified."
-              : "Missing checkout session.",
+          error: session
+            ? "Payment could not be verified."
+            : "Missing checkout session.",
         });
         setIsBusy(false);
       }
@@ -183,9 +171,8 @@ export default function PaymentVerificationWrapper({
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tier, session]);
+  }, [session]); // note: 'tier' intentionally NOT used for verification
 
-  // ----- UI states -----
   if (isBusy) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center px-6">
@@ -204,8 +191,7 @@ export default function PaymentVerificationWrapper({
     );
   }
 
-  // Explicit error UI (never white screen)
-  if (verification && !verification.verified && (tier === "starter" || tier === "pro")) {
+  if (verification && !verification.verified) {
     const fallbackId = session || "";
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center px-6">

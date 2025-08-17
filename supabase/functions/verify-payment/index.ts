@@ -20,10 +20,8 @@ function json(body: unknown, status = 200, corsOrigin = ""): Response {
 }
 
 serve(async (req: Request) => {
-  // ---- Env (fail fast) ----
-  const FRONTEND_DOMAIN = Deno.env.get("FRONTEND_DOMAIN"); // e.g. https://focus-flicker.cogello.com
+  const FRONTEND_DOMAIN = Deno.env.get("FRONTEND_DOMAIN"); // https://focus-flicker.cogello.com
   const STRIPE_SECRET_KEY = Deno.env.get("STRIPE_SECRET_KEY");
-  const STRIPE_WEBHOOK_SECRET = Deno.env.get("STRIPE_WEBHOOK_SECRET"); // not used here, just sanity check
   const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
   const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
   const STARTER_PRICE_ID = Deno.env.get("STARTER_PRICE_ID");
@@ -31,12 +29,8 @@ serve(async (req: Request) => {
 
   const corsOrigin = FRONTEND_DOMAIN ?? "";
 
-  if (req.method === "OPTIONS") {
-    return json({ ok: true }, 204, corsOrigin);
-  }
-  if (req.method !== "POST") {
-    return json({ ok: false, error: "Method not allowed" }, 405, corsOrigin);
-  }
+  if (req.method === "OPTIONS") return json({ ok: true }, 204, corsOrigin);
+  if (req.method !== "POST") return json({ ok: false, error: "Method not allowed" }, 405, corsOrigin);
 
   if (!FRONTEND_DOMAIN || !STRIPE_SECRET_KEY || !SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
     return json({ ok: false, error: "Missing required env vars" }, 500, corsOrigin);
@@ -53,63 +47,48 @@ serve(async (req: Request) => {
       httpClient: Stripe.createFetchHttpClient(),
     });
 
-    // 1) Retrieve the Checkout Session (authoritative)
+    // Retrieve Checkout Session
     const session = await stripe.checkout.sessions.retrieve(session_id, {
       expand: ["line_items.data.price"],
     });
 
-    // 2) Verify payment
+    // Paid-only per contract
     if (session.payment_status !== "paid") {
-      return json(
-        { ok: true, verified: false, error: "Payment not marked as paid." },
-        200,
-        corsOrigin,
-      );
+      return json({ ok: true, verified: false, error: "Payment not marked as paid." }, 200, corsOrigin);
     }
 
-    // 3) Determine plan
+    // Determine plan
     let plan = (session.metadata?.plan as Plan | undefined) ?? undefined;
-
     if (!plan) {
-      // Fallback via price ID if metadata is missing
-      const priceId: string | undefined =
-        session.line_items?.data?.[0]?.price?.id || undefined;
+      const priceId: string | undefined = session.line_items?.data?.[0]?.price?.id || undefined;
       if (priceId) {
         if (STARTER_PRICE_ID && priceId === STARTER_PRICE_ID) plan = "starter";
         if (PRO_PRICE_ID && priceId === PRO_PRICE_ID) plan = "pro";
       }
     }
-
     if (plan !== "starter" && plan !== "pro") {
-      return json(
-        { ok: false, error: "Unable to determine plan (starter|pro)." },
-        400,
-        corsOrigin,
-      );
+      return json({ ok: false, error: "Unable to determine plan (starter|pro)." }, 400, corsOrigin);
     }
 
-    // 4) Determine assessment_id (prefer body, then metadata)
+    // Determine assessment_id (prefer client, then metadata)
     const resolvedAssessmentId =
       (typeof assessmentIdFromClient === "string" && assessmentIdFromClient) ||
       (session.metadata?.assessment_id as string | undefined) ||
       (session.metadata?.assessmentId as string | undefined) ||
       null;
 
-    // 5) Append-only write to results_access
+    // Append-only write
     const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
       auth: { persistSession: false },
       global: { headers: { Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}` } },
     });
 
     if (resolvedAssessmentId) {
-      // Insert a new row. No upsert/overwrite.
       const { error: insertErr } = await supabase.from("results_access").insert({
         assessment_id: resolvedAssessmentId,
         plan,
         session_id,
       });
-
-      // If a harmless duplicate or transient error occurs, do not fail the request.
       if (insertErr) {
         console.warn("[verify-payment] insert warning:", insertErr.message);
       }
@@ -117,20 +96,11 @@ serve(async (req: Request) => {
       console.warn("[verify-payment] missing assessment_id; skipping DB insert for session", session_id);
     }
 
-    // 6) Respond with explicit JSON
-    return json(
-      {
-        ok: true,
-        verified: true,
-        plan,
-        assessment_id: resolvedAssessmentId,
-      },
-      200,
-      corsOrigin,
-    );
+    return json({ ok: true, verified: true, plan, assessment_id: resolvedAssessmentId }, 200, corsOrigin);
   } catch (err) {
     console.error("verify-payment error:", err);
     const message = err instanceof Error ? err.message : String(err);
+    // Still 200 so UI doesn't white-screen; message in body
     return json({ ok: false, error: message }, 200, corsOrigin);
   }
 });
