@@ -166,7 +166,6 @@ export default function PaymentVerificationWrapper({
             }
       );
       setIsBusy(false);
-      }
     };
 
     run();
@@ -194,9 +193,9 @@ export default function PaymentVerificationWrapper({
     );
   }
 
-    // Only show the failure card if this was a paid flow (starter/pro) or there *is* a session
-    // Free (no session) should *not* show an error card
-    if (verification && !verification.verified && (tier === "starter" || tier === "pro" || !!session)) {
+  // Only show the failure card if this was a paid flow (starter/pro) or there *is* a session
+  // Free (no session) should *not* show an error card
+  if (verification && !verification.verified && (tier === "starter" || tier === "pro" || !!session)) {
     const fallbackId = session || "";
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center px-6">
