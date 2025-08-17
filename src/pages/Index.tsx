@@ -1,47 +1,44 @@
-import React from 'react';
-import WelcomeScreen from '../components/WelcomeScreen';
-import ConsentScreen from '../components/ConsentScreen';
-import PostAssessment from '../components/PostAssessment';
-import PricingTiers from '../components/PricingTiers';
-import PaymentVerificationWrapper from '../components/PaymentVerificationWrapper';
-// Imports for the Focus Flicker task
-import FocusFlickerInstructions from '../components/FocusFlickerInstructions';
-import FocusFlickerDemo from '../components/FocusFlickerDemo';
-import FocusFlickerPractice from '../components/FocusFlickerPractice';
-import FocusFlickerTask from '../components/FocusFlickerTask';
+// src/pages/Index.tsx
+import React from "react";
+import WelcomeScreen from "../components/WelcomeScreen";
+import ConsentScreen from "../components/ConsentScreen";
+import PostAssessment from "../components/PostAssessment";
+import PricingTiers from "../components/PricingTiers";
+import PaymentVerificationWrapper from "../components/PaymentVerificationWrapper";
+
+// Focus Flicker task components
+import FocusFlickerInstructions from "../components/FocusFlickerInstructions";
+import FocusFlickerDemo from "../components/FocusFlickerDemo";
+import FocusFlickerPractice from "../components/FocusFlickerPractice";
+import FocusFlickerTask from "../components/FocusFlickerTask";
 
 export type AppPhase =
-  | 'welcome'
-  | 'consent'
-  | 'instructions'
-  | 'demo'
-  | 'practice'
-  | 'focusflicker'
-  | 'post-assessment'
-  | 'pricing'
-  | 'results';
+  | "welcome"
+  | "consent"
+  | "instructions"
+  | "demo"
+  | "practice"
+  | "focusflicker" // assessment phase
+  | "post-assessment"
+  | "pricing"
+  | "results";
 
-// The current task determines which set of instructions, practice,
-// demonstration and main engine to render.  Flex Sort remains the default.
 // Only Focus Flicker is available as a task
-export type TaskType = 'focusFlicker';
+export type TaskType = "focusFlicker";
 
 export interface TrialData {
   trial_number: number;
   user_choice: string;
   correct: boolean;
   /**
-   * The sorting rule for Flex Sort.  For Focus Flicker this value is
-   * always set to 'flicker' so the results dashboard can distinguish
-   * between paradigms without misinterpreting the data.  Keeping the
-   * property optional allows backwards compatibility with legacy
-   * assessments that only provide the three classic rule values.
+   * For Focus Flicker this value is always 'flicker' so downstream
+   * components can distinguish paradigms without misinterpreting data.
    */
-  rule: 'color' | 'shape' | 'number' | 'flicker';
+  rule: "color" | "shape" | "number" | "flicker";
   response_time: number;
   perseverative: boolean;
   adaptation_latency: number | null;
-  trial_type: 'core' | 'buffer' | 'guided' | 'extended' | 'demo' | 'practice';
+  trial_type: "core" | "buffer" | "guided" | "extended" | "demo" | "practice";
   timestamp: number;
   initial_rule_discovery_latency: number | null;
   rule_switch: boolean;
@@ -49,21 +46,9 @@ export interface TrialData {
   trial_in_block: number;
   rule_block_number: number;
 
-    /**
-     * Indicates whether a change occurred on the current Focus Flicker trial.
-     * For Flex Sort this will be undefined.  Including this flag in the
-     * exported CSV helps researchers quickly filter hits, misses and false
-     * alarms when analysing flicker data.
-     */
-    change_occurred?: boolean;
-
-    /**
-     * The display duration (in milliseconds) used on the current trial.
-     * Capturing the flicker speed at each step allows nuanced analysis of
-     * adaptive pacing.  This field is only populated for Focus Flicker
-     * assessments.
-     */
-    display_ms?: number;
+  // Focus Flicker-specific
+  change_occurred?: boolean;
+  display_ms?: number;
 }
 
 export interface AssessmentData {
@@ -77,29 +62,23 @@ export interface AssessmentData {
   rule_training_triggered: boolean;
   completed_at: string;
 
-    /**
-     * Overall attention score calculated for Focus Flicker assessments.  This
-     * value is scaled from 0–100 where higher scores reflect the ability to
-     * detect rapid changes at higher flicker frequencies.  For legacy
-     * Flex Sort assessments this property will be undefined.
-     */
-    attention_score?: number;
+  // Focus Flicker-specific
+  attention_score?: number;
 }
 
 const STORAGE_KEYS = {
-  assessmentData: 'assessment_data',
-  assessmentId: 'current_assessment_id',
-  selectedTier: 'selected_tier',
+  assessmentData: "assessment_data",
+  assessmentId: "current_assessment_id",
+  selectedTier: "selected_tier",
 };
 
-// small, dependency-free id
+// small, dependency-free id (fallback when crypto.randomUUID is unavailable)
 const genId = () =>
   `fs_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 
 const Index = () => {
-  const [currentPhase, setCurrentPhase] = React.useState<AppPhase>('welcome');
-  // Only one task is available so default and constant
-  const [currentTask, setCurrentTask] = React.useState<TaskType>('focusFlicker');
+  const [currentPhase, setCurrentPhase] = React.useState<AppPhase>("welcome");
+  const [currentTask, setCurrentTask] = React.useState<TaskType>("focusFlicker");
   const [assessmentData, setAssessmentData] = React.useState<AssessmentData>({
     trials: [],
     cognitive_flexibility_score: 0,
@@ -109,56 +88,87 @@ const Index = () => {
     avg_response_time: 0,
     guided_mode_triggered: false,
     rule_training_triggered: false,
-    completed_at: '',
+    completed_at: "",
   });
-  const [selectedTier, setSelectedTier] = React.useState<string>('free');
-  const [sessionId, setSessionId] = React.useState<string>('');
+  const [selectedTier, setSelectedTier] = React.useState<string>("free");
+  const [sessionId, setSessionId] = React.useState<string>("");
 
   function handlePhaseTransition(nextPhase: AppPhase) {
-    return setCurrentPhase(nextPhase);
+    setCurrentPhase(nextPhase);
   }
 
-  // When assessment completes, persist results + an assessment_id
-  const handleAssessmentComplete = (data: AssessmentData | (AssessmentData & { task?: string })) => {
-    const existingId = localStorage.getItem(STORAGE_KEYS.assessmentId);
-    const assessmentId = existingId || genId();
+  // ────────────────────────────────────────────────────────────────────────────
+  // ✅ NEW: Whenever we ENTER the assessment phase ('focusflicker'),
+  // generate a fresh assessment_id and clear stale plan hints.
+  // This ensures a truly Free run stays free unless a *new* purchase is made.
+  // ────────────────────────────────────────────────────────────────────────────
+  const prevPhaseRef = React.useRef<AppPhase>("welcome");
+  React.useEffect(() => {
+    if (prevPhaseRef.current !== "focusflicker" && currentPhase === "focusflicker") {
+      try {
+        const id =
+          typeof crypto !== "undefined" && "randomUUID" in crypto
+            ? crypto.randomUUID()
+            : genId();
 
-    // Tag the assessment with the current task so downstream components can
-    // tailor messaging.  This is a no‑op for Flex Sort where the engine
-    // doesn’t attach a task field.
+        localStorage.setItem(STORAGE_KEYS.assessmentId, id);
+
+        // Clear any stale plan hints so this run starts as truly "free"
+        localStorage.removeItem("access_plan");
+        localStorage.removeItem(STORAGE_KEYS.selectedTier);
+        setSelectedTier("free");
+      } catch {
+        // best-effort; ignore
+      }
+    }
+    prevPhaseRef.current = currentPhase;
+  }, [currentPhase]);
+  // ────────────────────────────────────────────────────────────────────────────
+
+  // When assessment completes, persist results (ID is already set when we entered 'focusflicker')
+  const handleAssessmentComplete = (
+    data: AssessmentData | (AssessmentData & { task?: string })
+  ) => {
+    const existingId = localStorage.getItem(STORAGE_KEYS.assessmentId);
+    const assessmentId =
+      existingId ||
+      (typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : genId());
+
     const tagged = { ...data, task: (data as any).task || currentTask } as any;
 
     localStorage.setItem(STORAGE_KEYS.assessmentId, assessmentId);
     localStorage.setItem(STORAGE_KEYS.assessmentData, JSON.stringify(tagged));
 
     setAssessmentData(tagged);
-    setCurrentPhase('post-assessment');
+    setCurrentPhase("post-assessment");
   };
 
-  // Pricing tier selected (for Free flow) – but for paid flow we still persist tier
+  // Pricing tier selection
   const handleTierSelection = (tier: string) => {
-  setSelectedTier(tier);
-  localStorage.setItem(STORAGE_KEYS.selectedTier, tier);
+    setSelectedTier(tier);
+    localStorage.setItem(STORAGE_KEYS.selectedTier, tier);
 
-  if (tier === 'free') {
-    // Free unlocks immediately
-    setCurrentPhase('results');
-  } else {
-    // Paid tiers: stay on pricing; PricingTiers will redirect to Stripe
-    setCurrentPhase('pricing');
-  }
-};
+    if (tier === "free") {
+      // Free unlocks immediately
+      setCurrentPhase("results");
+    } else {
+      // Paid tiers: remain on pricing; PricingTiers will redirect to Stripe
+      setCurrentPhase("pricing");
+    }
+  };
 
   // On first mount:
-  // 1) If we’re returning from Stripe (?checkout=success), recover params and local state.
-  // 2) Otherwise, reload any locally stored assessment data so refresh doesn't lose results.
+  // 1) If returning from Stripe (?checkout=success), capture params.
+  // 2) Otherwise, hydrate local results for refresh resilience.
   React.useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    const checkout = params.get('checkout');
-    const tierParam = params.get('tier');
-    const sid = params.get('session_id');
+    const checkout = params.get("checkout");
+    const tierParam = params.get("tier");
+    const sid = params.get("session_id");
 
-    // Always try to hydrate from localStorage (covers both fresh return & plain refresh)
+    // Hydrate stored results (covers fresh return & plain refresh)
     const savedDataRaw = localStorage.getItem(STORAGE_KEYS.assessmentData);
     if (savedDataRaw) {
       try {
@@ -168,52 +178,56 @@ const Index = () => {
         // ignore parse errors
       }
     }
+
     const savedTier = localStorage.getItem(STORAGE_KEYS.selectedTier);
     if (savedTier) setSelectedTier(savedTier);
 
-    if (checkout === 'success' && sid) {
-      // We trust webhook to gate access; here we just move to results and let
-      // PaymentVerificationWrapper call your verify endpoint with session_id.
+    if (checkout === "success" && sid) {
+      // Move to results and let PaymentVerificationWrapper verify the session.
       setSessionId(sid);
       if (tierParam) setSelectedTier(tierParam);
+      setCurrentPhase("results");
 
-      setCurrentPhase('results');
-
-      // Clean URL so you don't keep success params on refresh
-      window.history.replaceState({}, document.title, '/');
+      // Clean URL so refresh doesn't re-trigger parsing
+      try {
+        const { origin, pathname, hash } = window.location;
+        window.history.replaceState({}, document.title, `${origin}${pathname}${hash || ""}`);
+      } catch {
+        window.history.replaceState({}, document.title, "/");
+      }
     }
   }, []);
 
   const renderCurrentPhase = () => {
     switch (currentPhase) {
-      case 'welcome':
+      case "welcome":
         return (
           <WelcomeScreen
             onStartFocusFlicker={() => {
-              setCurrentTask('focusFlicker');
-              handlePhaseTransition('consent');
+              setCurrentTask("focusFlicker");
+              handlePhaseTransition("consent");
             }}
           />
         );
-      case 'consent':
-        return <ConsentScreen onNext={() => handlePhaseTransition('instructions')} />;
-      case 'instructions':
-        return <FocusFlickerInstructions onNext={() => handlePhaseTransition('demo')} />;
-      case 'demo':
-        return <FocusFlickerDemo onNext={() => handlePhaseTransition('practice')} />;
-      case 'practice':
-        return <FocusFlickerPractice onNext={() => handlePhaseTransition('focusflicker')} />;
-      case 'focusflicker':
+      case "consent":
+        return <ConsentScreen onNext={() => handlePhaseTransition("instructions")} />;
+      case "instructions":
+        return <FocusFlickerInstructions onNext={() => handlePhaseTransition("demo")} />;
+      case "demo":
+        return <FocusFlickerDemo onNext={() => handlePhaseTransition("practice")} />;
+      case "practice":
+        return <FocusFlickerPractice onNext={() => handlePhaseTransition("focusflicker")} />;
+      case "focusflicker":
         return <FocusFlickerTask onComplete={handleAssessmentComplete} />;
-      case 'post-assessment':
-        return <PostAssessment onNext={() => handlePhaseTransition('pricing')} />;
-      case 'pricing':
+      case "post-assessment":
+        return <PostAssessment onNext={() => handlePhaseTransition("pricing")} />;
+      case "pricing":
         return <PricingTiers onTierSelect={handleTierSelection} />;
-      case 'results':
+      case "results":
         return (
           <PaymentVerificationWrapper
             data={assessmentData}
-            tier={selectedTier}
+            tier={selectedTier as "free" | "starter" | "pro"}
             sessionId={sessionId}
           />
         );
@@ -221,8 +235,8 @@ const Index = () => {
         return (
           <WelcomeScreen
             onStartFocusFlicker={() => {
-              setCurrentTask('focusFlicker');
-              handlePhaseTransition('consent');
+              setCurrentTask("focusFlicker");
+              handlePhaseTransition("consent");
             }}
           />
         );
