@@ -45,6 +45,18 @@ function getAssessmentId(): string | undefined {
   }
 }
 
+// normalize plan key variations returned by different function implementations
+function normalizePlan(obj: any): Tier | undefined {
+  const p =
+    obj?.plan ??
+    obj?.plan_tier ??
+    obj?.tier ??
+    obj?.granted_tier ??
+    undefined;
+  if (p === "starter" || p === "pro") return p;
+  return undefined;
+}
+
 export default function PaymentVerificationWrapper({
   data,
   tier,
@@ -83,7 +95,8 @@ export default function PaymentVerificationWrapper({
       return undefined;
     }
     const plan = rows?.[0]?.plan as Tier | undefined;
-    return plan;
+    if (plan === "starter" || plan === "pro") return plan;
+    return undefined;
   };
 
   const callVerify = async (sid: string): Promise<VerificationResult> => {
@@ -107,10 +120,24 @@ export default function PaymentVerificationWrapper({
         };
       }
 
+      // tolerate different shapes from the Edge Function
+      const plan = normalizePlan(verifyData);
+      const ok = Boolean(
+        verifyData?.ok ??
+          // many implementations return 200 with just a body;
+          // treat the presence of verified as a successful logic response
+          (typeof verifyData?.verified === "boolean")
+      );
+      const verified = Boolean(
+        verifyData?.verified ??
+          // some functions use status enums – allow a strict truthy fallback only if we have plan
+          (verifyData?.status === "verified" && !!plan)
+      );
+
       return {
-        ok: !!verifyData?.ok,
-        verified: !!verifyData?.verified,
-        plan: verifyData?.plan,
+        ok,
+        verified,
+        plan,
         assessment_id: verifyData?.assessment_id ?? null,
         error: verifyData?.error,
       };
@@ -142,13 +169,21 @@ export default function PaymentVerificationWrapper({
         const v = await callVerify(session);
         if (!cancelled) {
           setVerification(v);
-          if (v.ok && v.verified && v.plan) {
-            setGrantedTier(v.plan); // 'pro' | 'starter'
-            localStorage.setItem("access_plan", v.plan);
-            localStorage.removeItem("selected_tier");
-            setShowNoLocalResults(!hasLocalResults);
-            setIsBusy(false);
-            return;
+
+          if (v.ok && v.verified) {
+            // prefer the plan from the function; if missing, check DB; if still missing, use the chosen tier (if not free)
+            let awarded: Tier | undefined =
+              v.plan ?? (await fetchGrantedFromDB()) ?? (tier !== "free" ? tier : undefined);
+
+            if (awarded === "starter" || awarded === "pro") {
+              setGrantedTier(awarded);
+              localStorage.setItem("access_plan", awarded);
+              localStorage.removeItem("selected_tier");
+              setShowNoLocalResults(!hasLocalResults);
+              setIsBusy(false);
+              return;
+            }
+            // fall through to DB check below if somehow still undefined
           }
           // fall through if verification didn't succeed
         }

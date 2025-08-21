@@ -1,106 +1,150 @@
-// supabase/functions/verify-payment/index.ts
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
-import Stripe from "https://esm.sh/stripe@16.12.0?target=deno";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
+import Stripe from "npm:stripe@14.25.0";
 
-type Plan = "starter" | "pro";
+// ---------- ENV ----------
+const STRIPE_SECRET_KEY = Deno.env.get("STRIPE_SECRET_KEY") ?? "";
+const STARTER_PRICE_ID = Deno.env.get("STARTER_PRICE_ID") ?? "";
+const PRO_PRICE_ID = Deno.env.get("PRO_PRICE_ID") ?? "";
+const RAW_FRONTEND_DOMAIN = Deno.env.get("FRONTEND_DOMAIN") ?? "";
 
-function json(body: unknown, status = 200, corsOrigin = ""): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: {
-      "Content-Type": "application/json",
-      "Access-Control-Allow-Origin": corsOrigin,
-      "Access-Control-Allow-Methods": "POST,OPTIONS",
-      "Access-Control-Allow-Headers":
-        "authorization, x-client-info, apikey, content-type",
-      "Vary": "Origin",
-    },
-  });
+// Normalize origin (no trailing slash)
+const FRONTEND_DOMAIN = RAW_FRONTEND_DOMAIN.replace(/\/+$/, "");
+
+const stripe = new Stripe(STRIPE_SECRET_KEY, { apiVersion: "2024-06-20" });
+
+// ---------- CORS ----------
+const ALLOWED_ORIGINS = new Set([
+  FRONTEND_DOMAIN,
+  "http://localhost:3000",
+  "http://localhost:5173",
+]);
+
+function corsHeadersFor(req: Request) {
+  const origin = req.headers.get("Origin") || "";
+  const allow = ALLOWED_ORIGINS.has(origin) ? origin : FRONTEND_DOMAIN || "*";
+  return {
+    "Access-Control-Allow-Origin": allow,
+    "Access-Control-Allow-Methods": "POST,OPTIONS",
+    "Access-Control-Allow-Headers":
+      "authorization, x-client-info, apikey, content-type",
+    "Vary": "Origin",
+  };
 }
 
-serve(async (req: Request) => {
-  const FRONTEND_DOMAIN = Deno.env.get("FRONTEND_DOMAIN"); // https://focus-flicker.cogello.com
-  const STRIPE_SECRET_KEY = Deno.env.get("STRIPE_SECRET_KEY");
-  const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
-  const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-  const STARTER_PRICE_ID = Deno.env.get("STARTER_PRICE_ID");
-  const PRO_PRICE_ID = Deno.env.get("PRO_PRICE_ID");
+function json(body: unknown, init: ResponseInit = {}, req?: Request) {
+  const headers = new Headers(init.headers);
+  headers.set("content-type", "application/json; charset=utf-8");
+  const ch = corsHeadersFor(req!);
+  for (const [k, v] of Object.entries(ch)) headers.set(k, v);
+  return new Response(JSON.stringify(body), { ...init, headers });
+}
 
-  const corsOrigin = FRONTEND_DOMAIN ?? "";
+// ---------- HELPERS ----------
+function inferPlanFromSession(
+  s: Stripe.Checkout.Session,
+  starterId: string,
+  proId: string,
+): "starter" | "pro" | null {
+  // Strongest signal: metadata set at session creation
+  const m = s.metadata ?? {};
+  if (m.plan === "starter" || m.plan === "pro") return m.plan as "starter" | "pro";
 
-  if (req.method === "OPTIONS") return json({ ok: true }, 204, corsOrigin);
-  if (req.method !== "POST") return json({ ok: false, error: "Method not allowed" }, 405, corsOrigin);
+  // Fallback: price id from first line item
+  const li = (s as any).line_items?.data?.[0];
+  const priceId: string | undefined = li?.price?.id;
+  if (priceId === starterId) return "starter";
+  if (priceId === proId) return "pro";
+  return null;
+}
 
-  if (!FRONTEND_DOMAIN || !STRIPE_SECRET_KEY || !SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-    return json({ ok: false, error: "Missing required env vars" }, 500, corsOrigin);
+function isPaidLike(session: Stripe.Checkout.Session): boolean {
+  if (session.payment_status === "paid") return true;
+  if (session.status === "complete" && session.payment_status === "paid") return true;
+
+  // Look at the PaymentIntent too
+  const pi = session.payment_intent && typeof session.payment_intent !== "string"
+    ? (session.payment_intent as Stripe.Response<Stripe.PaymentIntent>)
+    : null;
+
+  if (!pi) return false;
+  if (pi.status === "succeeded") return true;
+  // Optional: if you ever capture later
+  if (pi.status === "requires_capture") return true;
+
+  // Some processors mark charge as succeeded before PI status flips
+  const anyChargeSucceeded = pi.charges?.data?.some(
+    (c) => c.paid && c.status === "succeeded",
+  );
+  return Boolean(anyChargeSucceeded);
+}
+
+function isStillProcessing(session: Stripe.Checkout.Session): boolean {
+  if (session.payment_status === "processing") return true;
+
+  const pi = session.payment_intent && typeof session.payment_intent !== "string"
+    ? (session.payment_intent as Stripe.Response<Stripe.PaymentIntent>)
+    : null;
+
+  if (!pi) return false;
+  if (pi.status === "processing") return true;
+  if (pi.status === "requires_action" || (pi as any).next_action) return true;
+  return false;
+}
+
+// ---------- SERVER ----------
+serve(async (req) => {
+  // Preflight
+  if (req.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: corsHeadersFor(req) });
+  }
+  if (req.method !== "POST") {
+    return json({ error: "Method not allowed" }, { status: 405 }, req);
   }
 
   try {
-    const { session_id, assessment_id: assessmentIdFromClient } = await req.json().catch(() => ({}));
+    const { session_id } = await req.json().catch(() => ({}));
     if (!session_id || typeof session_id !== "string") {
-      return json({ ok: false, error: "Missing or invalid 'session_id'" }, 400, corsOrigin);
+      return json({ error: "Missing session_id" }, { status: 400 }, req);
     }
 
-    const stripe = new Stripe(STRIPE_SECRET_KEY, {
-      apiVersion: "2024-06-20",
-      httpClient: Stripe.createFetchHttpClient(),
-    });
-
-    // Retrieve Checkout Session
     const session = await stripe.checkout.sessions.retrieve(session_id, {
-      expand: ["line_items.data.price"],
+      expand: ["line_items.data.price", "payment_intent.charges.data"],
     });
 
-    // Paid-only per contract
-    if (session.payment_status !== "paid") {
-      return json({ ok: true, verified: false, error: "Payment not marked as paid." }, 200, corsOrigin);
-    }
-
-    // Determine plan
-    let plan = (session.metadata?.plan as Plan | undefined) ?? undefined;
-    if (!plan) {
-      const priceId: string | undefined = session.line_items?.data?.[0]?.price?.id || undefined;
-      if (priceId) {
-        if (STARTER_PRICE_ID && priceId === STARTER_PRICE_ID) plan = "starter";
-        if (PRO_PRICE_ID && priceId === PRO_PRICE_ID) plan = "pro";
+    if (isPaidLike(session)) {
+      const plan = inferPlanFromSession(session, STARTER_PRICE_ID, PRO_PRICE_ID);
+      if (!plan) {
+        return json({ ok: false, reason: "unknown_plan" }, { status: 500 }, req);
       }
-    }
-    if (plan !== "starter" && plan !== "pro") {
-      return json({ ok: false, error: "Unable to determine plan (starter|pro)." }, 400, corsOrigin);
-    }
-
-    // Determine assessment_id (prefer client, then metadata)
-    const resolvedAssessmentId =
-      (typeof assessmentIdFromClient === "string" && assessmentIdFromClient) ||
-      (session.metadata?.assessment_id as string | undefined) ||
-      (session.metadata?.assessmentId as string | undefined) ||
-      null;
-
-    // Append-only write
-    const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
-      auth: { persistSession: false },
-      global: { headers: { Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}` } },
-    });
-
-    if (resolvedAssessmentId) {
-      const { error: insertErr } = await supabase.from("results_access").insert({
-        assessment_id: resolvedAssessmentId,
-        plan,
-        session_id,
-      });
-      if (insertErr) {
-        console.warn("[verify-payment] insert warning:", insertErr.message);
-      }
-    } else {
-      console.warn("[verify-payment] missing assessment_id; skipping DB insert for session", session_id);
+      return json(
+        {
+          ok: true,
+          plan,
+          session_id,
+          assessment_id: session.metadata?.assessment_id ?? null,
+        },
+        { status: 200 },
+        req,
+      );
     }
 
-    return json({ ok: true, verified: true, plan, assessment_id: resolvedAssessmentId }, 200, corsOrigin);
+    if (isStillProcessing(session)) {
+      // IMPORTANT: 200 + pending:true so your UI keeps polling instead of showing an error
+      return json(
+        { ok: false, pending: true, session_status: session.status },
+        { status: 200 },
+        req,
+      );
+    }
+
+    // Not paid and not processing => real failure / abandoned
+    return json(
+      { ok: false, reason: "unpaid", session_status: session.status },
+      { status: 402 },
+      req,
+    );
   } catch (err) {
-    console.error("verify-payment error:", err);
-    const message = err instanceof Error ? err.message : String(err);
-    // Still 200 so UI doesn't white-screen; message in body
-    return json({ ok: false, error: message }, 200, corsOrigin);
+    console.error("[verify-payment] Error:", err);
+    return json({ ok: false, error: "verification_failed" }, { status: 500 }, req);
   }
 });
